@@ -9,7 +9,7 @@ venv/
 
 # local embeddings + big model artifacts (keep out if you don't want them in repo)
 content/embeddings/
-embeddings/
+
 *.faiss
 *.npy
 pages.faiss
