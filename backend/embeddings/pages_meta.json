@@ -1,8 +1,12 @@
 [
   {
     "id": 0,
-    "url": "",
-    "path": "scrape\\content\\pages.json",
-    "chunk_id": null
+    "url": "https://scriptbees.com/contact-page/",
+    "title": "Contact Us – ScriptBees"
+  },
+  {
+    "id": 1,
+    "url": "https://scriptbees.com/about/",
+    "title": "About Us – ScriptBees"
   }
 ]

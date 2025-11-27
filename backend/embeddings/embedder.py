@@ -1,35 +1,27 @@
 #!/usr/bin/env python3
 """
-embeddings/embedder.py
+embeddings/embedder.py - Minimal embedder for ScriptBees RAG
 
-Build embeddings + FAISS index for a content folder.
-
-Outputs in persist-dir:
- - index.faiss
- - docs.json   (list, order matches index positions)
- - embeddings.npy
+Purpose:
+ - Read scraped pages (content/pages.json) OR scan content/ for text files
+ - Produce backend/embeddings/pages.json, pages_meta.json and pages.faiss
+ - Supports sentence-transformers (default) or OpenAI embeddings (--use-openai)
 
 Usage:
-  python embeddings/embedder.py --content-dir ./content --persist-dir ./embeddings --model all-MiniLM-L6-v2
-  python embeddings/embedder.py --content-dir ./content --persist-dir ./embeddings --use-openai --openai-model text-embedding-ada-002
-
-Notes:
- - By default uses sentence-transformers. To use OpenAI embeddings set OPENAI_API_KEY env var and pass --use-openai.
- - Uses IndexFlatIP (cosine) with normalized vectors.
- - Documents are stored as a list. Index positions correspond to list order.
+  python embeddings/embedder.py --content-dir ./content --persist-dir ./backend/embeddings
+  python embeddings/embedder.py --use-openai --openai-model text-embedding-ada-002
 """
+
 import os
-import argparse
 import json
+import argparse
 from pathlib import Path
 from typing import List, Dict
 
 import numpy as np
 from tqdm import tqdm
-from bs4 import BeautifulSoup
-from dotenv import load_dotenv
 
-# optional imports
+# optional libs
 try:
     from sentence_transformers import SentenceTransformer
     HAS_S2 = True
@@ -48,56 +40,67 @@ try:
 except Exception:
     HAS_OPENAI = False
 
-
-def load_text_from_file(path: Path) -> str:
-    text = ""
-    suffix = path.suffix.lower()
+# -------------------------
+# Utilities
+# -------------------------
+def load_pages_json(path: Path) -> List[Dict]:
+    """Load pages.json produced by scraper if present."""
     try:
-        content = path.read_text(encoding="utf-8", errors="ignore")
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Ensure each entry has id, url, title, text
+        pages = []
+        for i, p in enumerate(data):
+            pages.append({
+                "id": int(p.get("id", i)),
+                "url": p.get("url", ""),
+                "title": p.get("title", "") or "",
+                "text": (p.get("text") or "")[:20000]  # cap to avoid huge texts
+            })
+        return pages
     except Exception:
-        return ""
-    if suffix in {".html", ".htm"}:
-        soup = BeautifulSoup(content, "html.parser")
-        for s in soup(["script", "style", "noscript", "header", "footer", "nav"]):
-            s.decompose()
-        text = soup.get_text(separator=" ")
-    else:
-        text = content
-    text = " ".join(text.split())
-    return text
+        return []
 
 
-def gather_documents(content_dir: Path, exts=None, min_len=50) -> List[Dict]:
+def gather_from_files(content_dir: Path, exts=None, min_len=50) -> List[Dict]:
+    """Scan content_dir for files and extract text (simple)."""
     if exts is None:
-        exts = {".txt", ".md", ".html", ".htm", ".json"}
+        exts = {".html", ".htm", ".md", ".txt", ".json"}
     docs = []
     for p in sorted(content_dir.rglob("*")):
         if p.is_file() and p.suffix.lower() in exts:
-            txt = load_text_from_file(p)
-            if not txt or len(txt) < min_len:
+            try:
+                txt = p.read_text(encoding="utf-8", errors="ignore")
+                txt = " ".join(txt.split())
+                if len(txt) < min_len:
+                    continue
+                docs.append({
+                    "id": len(docs),
+                    "url": str(p),
+                    "title": p.stem,
+                    "text": txt[:20000]
+                })
+            except Exception:
                 continue
-            docs.append({
-                # DO NOT use file path as id; we'll use list index as index-id
-                "path": str(p.relative_to(content_dir)),
-                "text": txt
-            })
     return docs
 
 
-def embed_with_sentence_transformers(texts: List[str], model_name: str):
+# -------------------------
+# Embedding backends
+# -------------------------
+def embed_with_sentence_transformers(texts: List[str], model_name: str = "all-MiniLM-L6-v2"):
     if not HAS_S2:
-        raise RuntimeError("sentence-transformers not installed.")
+        raise RuntimeError("sentence-transformers not installed. pip install sentence-transformers")
     model = SentenceTransformer(model_name)
     emb = model.encode(texts, show_progress_bar=True, convert_to_numpy=True)
     return np.asarray(emb, dtype=np.float32)
 
 
-def embed_with_openai(texts: List[str], model_name: str):
+def embed_with_openai(texts: List[str], model_name: str = "text-embedding-ada-002"):
     if not HAS_OPENAI:
-        raise RuntimeError("openai package not installed.")
-    # batch in chunks to avoid very large requests
-    B = 16
+        raise RuntimeError("openai package not installed. pip install openai")
     out = []
+    B = 16
     for i in tqdm(range(0, len(texts), B), desc="OpenAI embeddings"):
         batch = texts[i : i + B]
         resp = openai.Embedding.create(input=batch, model=model_name)
@@ -108,79 +111,95 @@ def embed_with_openai(texts: List[str], model_name: str):
 
 def build_faiss_index(embeddings: np.ndarray):
     if not HAS_FAISS:
-        raise RuntimeError("faiss not installed.")
+        raise RuntimeError("faiss not installed. pip install faiss-cpu")
     if embeddings.ndim != 2:
-        raise ValueError("Embeddings must be 2D array (n, d)")
-    # normalize for cosine (inner product)
+        raise ValueError("Embeddings must be 2D (n, d)")
     emb_norm = embeddings.copy()
     faiss.normalize_L2(emb_norm)
     d = emb_norm.shape[1]
-    index = faiss.IndexFlatIP(d)
+    index = faiss.IndexFlatIP(d)  # inner-product on normalized vectors == cosine
     index.add(emb_norm)
     return index
 
 
+# -------------------------
+# Main
+# -------------------------
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--content-dir", type=str, default="./content")
-    parser.add_argument("--persist-dir", type=str, default="./embeddings")
-    parser.add_argument("--model", type=str, default="all-MiniLM-L6-v2",
-                        help="sentence-transformers model name (default) or OpenAI model if --use-openai")
+    parser.add_argument("--persist-dir", type=str, default="./backend/embeddings")
+    parser.add_argument("--model", type=str, default="all-MiniLM-L6-v2")
     parser.add_argument("--use-openai", action="store_true", help="Use OpenAI embeddings (requires OPENAI_API_KEY)")
-    parser.add_argument("--openai-model", type=str, default="text-embedding-ada-002", help="OpenAI embedding model")
-    parser.add_argument("--min-len", type=int, default=50, help="Minimum text length to include")
+    parser.add_argument("--openai-model", type=str, default="text-embedding-ada-002")
+    parser.add_argument("--min-len", type=int, default=50)
     args = parser.parse_args()
 
-    load_dotenv()
     content_dir = Path(args.content_dir)
     persist_dir = Path(args.persist_dir)
     persist_dir.mkdir(parents=True, exist_ok=True)
 
-    if not content_dir.exists():
-        raise SystemExit(f"Content dir not found: {content_dir}")
+    # 1) Prefer scraper-produced pages.json (content/pages.json)
+    scraper_pages_path = content_dir / "pages.json"
+    if scraper_pages_path.exists():
+        print("Loading pages from", scraper_pages_path)
+        pages = load_pages_json(scraper_pages_path)
+    else:
+        print("No pages.json found; scanning files under", content_dir)
+        pages = gather_from_files(content_dir, min_len=args.min_len)
 
-    docs = gather_documents(content_dir, min_len=args.min_len)
-    if not docs:
-        raise SystemExit("No documents found. Check content directory.")
+    if not pages:
+        raise SystemExit("No documents found. Run scraper first or check content directory.")
 
-    texts = [d["text"] for d in docs]
+    # Prepare texts aligned with index positions
+    texts = [p["text"] for p in pages]
 
-    # choose embedding backend
+    # Choose embeddings backend
     use_openai = args.use_openai or (os.getenv("OPENAI_API_KEY") is not None and args.use_openai)
     if use_openai:
         if not HAS_OPENAI:
             raise RuntimeError("OpenAI SDK not installed. pip install openai")
         openai.api_key = os.getenv("OPENAI_API_KEY")
-        print("Using OpenAI embeddings with model:", args.openai_model)
+        print("Using OpenAI embeddings model:", args.openai_model)
         embeddings = embed_with_openai(texts, args.openai_model)
     else:
-        if not HAS_S2:
-            raise RuntimeError("sentence-transformers not installed. pip install sentence-transformers")
         print("Using sentence-transformers model:", args.model)
         embeddings = embed_with_sentence_transformers(texts, args.model)
 
     embeddings = np.asarray(embeddings, dtype=np.float32)
-    # build index
     index = build_faiss_index(embeddings)
 
-    # Save outputs: docs.json is the list of docs in the SAME ORDER as embeddings/index positions!
-    out_docs = []
-    for i, d in enumerate(docs):
-        out_docs.append({
-            "id": i,            # numeric index id -> matches FAISS position
-            "path": d["path"],
-            "text": d["text"]   # optionally you can store a shorter preview if too large
+    # Save outputs with names main.py expects
+    pages_out = []
+    meta_out = []
+    for i, p in enumerate(pages):
+        pid = int(p.get("id", i))
+        url = p.get("url", "") or ""
+        title = p.get("title", "") or ""
+        text_preview = (p.get("text") or "")[:4000]  # keep a preview to save space
+        pages_out.append({
+            "id": pid,
+            "url": url,
+            "title": title,
+            "text": text_preview
         })
+        meta_out.append({"id": pid, "url": url, "title": title})
 
-    with open(persist_dir / "docs.json", "w", encoding="utf-8") as f:
-        json.dump(out_docs, f, ensure_ascii=False, indent=2)
+    # filenames expected by backend/main.py
+    pages_path = persist_dir / "pages.json"
+    meta_path = persist_dir / "pages_meta.json"
+    index_path = persist_dir / "pages.faiss"
 
-    np.save(persist_dir / "embeddings.npy", embeddings)
-    # write index file
-    faiss.write_index(index, str(persist_dir / "index.faiss"))
+    with open(pages_path, "w", encoding="utf-8") as f:
+        json.dump(pages_out, f, ensure_ascii=False, indent=2)
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta_out, f, ensure_ascii=False, indent=2)
 
-    print(f"Saved {len(out_docs)} docs to {persist_dir}/docs.json")
-    print(f"Saved FAISS index to {persist_dir}/index.faiss")
+    faiss.write_index(index, str(index_path))
+
+    print(f"\nSaved {len(pages_out)} pages to {pages_path}")
+    print(f"Saved metadata to {meta_path}")
+    print(f"Saved FAISS index to {index_path}")
     print("Done.")
 
 

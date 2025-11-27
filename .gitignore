@@ -1,6 +1,30 @@
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+venv/
 .env
 .env.*
-*.backup
+
+# local embeddings + big model artifacts (keep out if you don't want them in repo)
 content/embeddings/
+embeddings/
+*.faiss
+*.npy
+pages.faiss
+pages.json
+pages_meta.json
+
+# large model files, safety
+*.safetensors
+*.bin
+*.onnx
+*.gguf
+*.pt
+*.pth
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
