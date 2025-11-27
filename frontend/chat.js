@@ -1,30 +1,22 @@
 /**
- * ScriptBees RAG Chatbot Frontend
- * Connects to POST /api/ask endpoint with API key authentication
- * Configured for ScriptBees.com content
+ * ScriptBees RAG Chatbot Frontend - improved
+ * - Prevents page reloads
+ * - Robust DOM init
+ * - Connection status updates
+ * - Better error handling
  */
 
-// ==========================================
-// CONFIGURATION
-// ==========================================
+// ========== CONFIGURATION ==========
+let API_URL = 'https://chat-bot-6sgm.onrender.com'; // <-- update to your deployed backend (https://your-backend.example.com)
+let API_KEY = 'X2Cli1ZSPhHHAHlfZkOEPRWIqtd1TQD9ErH705-HMc4'; // <-- replace with production key or set via runtime
 
-const API_URL = 'http://localhost:8000'.trim(); // Backend URL
-let API_KEY = 'X2Cli1ZSPhHHAHlfZkOEPRWIqtd1TQD9ErH705-HMc4'; // Default API Key
+// ========== STATE & DOM refs (initialized in init) ==========
+let chatMessages, chatForm, userInput, sendButton;
+let statusDot, statusText;
 
-// ==========================================
-// DOM ELEMENTS
-// ==========================================
-
-const chatMessages = document.getElementById('chat-messages');
-const chatForm = document.getElementById('chat-form');
-const userInput = document.getElementById('user-input');
-const sendButton = document.getElementById('send-button');
-
-// ==========================================
-// MESSAGE FUNCTIONS
-// ==========================================
-
+// ========== MESSAGE HELPERS ==========
 function addMessage(text, isUser = false, sources = null, isError = false, metadata = null) {
+    if (!chatMessages) return;
     const msg = document.createElement('div');
     msg.className = `message ${isUser ? 'user-message' : 'bot-message'}`;
 
@@ -33,33 +25,28 @@ function addMessage(text, isUser = false, sources = null, isError = false, metad
     if (isError) content.classList.add('error-message');
 
     const textElem = document.createElement('p');
-    textElem.innerHTML = text.replace(/\n/g, '<br>');
+    textElem.innerHTML = String(text).replace(/\n/g, '<br>');
     content.appendChild(textElem);
 
-    // Add sources if available
     if (sources && sources.length > 0) {
         const srcDiv = document.createElement('div');
         srcDiv.className = 'sources';
-
         const title = document.createElement('div');
         title.className = 'sources-title';
         title.textContent = '📚 Sources from ScriptBees.com:';
         srcDiv.appendChild(title);
-
         sources.forEach(url => {
             const link = document.createElement('a');
             link.href = url;
-            link.textContent = url.replace('https://scriptbees.com', '').replace('https://www.scriptbees.com', '') || '/home';
+            link.textContent = (url || '').replace('https://scriptbees.com', '').replace('https://www.scriptbees.com', '') || '/';
             link.className = 'source-link';
             link.target = '_blank';
             link.rel = 'noopener noreferrer';
             srcDiv.appendChild(link);
         });
-
         content.appendChild(srcDiv);
     }
 
-    // Add metadata (response time, cached status)
     if (metadata) {
         const metaDiv = document.createElement('div');
         metaDiv.className = 'metadata';
@@ -67,16 +54,13 @@ function addMessage(text, isUser = false, sources = null, isError = false, metad
         metaDiv.style.color = '#64748b';
         metaDiv.style.marginTop = '8px';
         metaDiv.style.fontStyle = 'italic';
-        
         let metaText = '';
-        if (metadata.response_time_seconds) {
-            metaText += `⚡ ${metadata.response_time_seconds.toFixed(2)}s`;
+        if (metadata.response_time_seconds) metaText += `⚡ ${metadata.response_time_seconds.toFixed(2)}s`;
+        if (metadata.cached) metaText += (metaText ? ' • ' : '') + '💾 Cached';
+        if (metaText) {
+            metaDiv.textContent = metaText;
+            content.appendChild(metaDiv);
         }
-        if (metadata.cached) {
-            metaText += ' • 💾 Cached';
-        }
-        metaDiv.textContent = metaText;
-        if (metaText) content.appendChild(metaDiv);
     }
 
     msg.appendChild(content);
@@ -85,19 +69,18 @@ function addMessage(text, isUser = false, sources = null, isError = false, metad
 }
 
 function showTyping() {
+    if (!chatMessages) return;
+    removeTyping();
     const typing = document.createElement('div');
     typing.className = 'message bot-message';
     typing.id = 'typing-indicator';
-
     const content = document.createElement('div');
     content.className = 'message-content typing-indicator';
-
     for (let i = 0; i < 3; i++) {
         const dot = document.createElement('div');
         dot.className = 'typing-dot';
         content.appendChild(dot);
     }
-
     typing.appendChild(content);
     chatMessages.appendChild(typing);
     chatMessages.scrollTop = chatMessages.scrollHeight;
@@ -108,42 +91,56 @@ function removeTyping() {
     if (typing) typing.remove();
 }
 
-// ==========================================
-// API FUNCTIONS
-// ==========================================
-
-async function sendQuery(question) {
+// ========== STATUS UI ==========
+function setStatus(connected) {
     try {
-        const response = await fetch(`${API_URL}/api/ask`, {
+        if (!statusDot || !statusText) {
+            statusDot = document.getElementById('status-dot');
+            statusText = document.getElementById('status-text');
+        }
+        if (!statusDot || !statusText) return;
+        if (connected) {
+            statusDot.classList.add('online');
+            statusText.textContent = 'Connected';
+        } else {
+            statusDot.classList.remove('online');
+            statusText.textContent = 'Disconnected';
+        }
+    } catch (e) {
+        // ignore
+        console.warn('setStatus error', e);
+    }
+}
+
+// ========== API CALLS ==========
+async function sendQuery(question) {
+    const payload = { question };
+    try {
+        const response = await fetch(`${API_URL.replace(/\/+$/, '')}/api/ask`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'X-API-Key': API_KEY
             },
-            body: JSON.stringify({ question })
+            body: JSON.stringify(payload),
         });
 
         if (!response.ok) {
-            const err = await response.json().catch(() => ({}));
+            // attempt to parse JSON error
+            let err = {};
+            try { err = await response.json(); } catch (e) { /* ignore */ }
             if (response.status === 403) throw new Error('Invalid API key. Please check your configuration.');
             if (response.status === 503) throw new Error('Server still loading models. Please wait...');
             if (response.status === 404) throw new Error('API endpoint not found. Check backend is running.');
-
             throw new Error(err.detail || err.error || `Server error (${response.status})`);
         }
 
-        return await response.json();
-
+        const json = await response.json();
+        return json;
     } catch (err) {
-        if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) {
-            throw new Error(
-                `Cannot connect to backend at ${API_URL}\n\n` +
-                `Troubleshooting:\n` +
-                `1. Ensure backend is running (python main.py)\n` +
-                `2. Check CORS is enabled\n` +
-                `3. Verify API key is correct\n` +
-                `4. Check firewall/network settings`
-            );
+        const m = String(err.message || err || 'Network error');
+        if (m.includes('Failed to fetch') || m.includes('NetworkError') || m.includes('NetworkError')) {
+            throw new Error(`Cannot connect to backend at ${API_URL}\nCheck backend, CORS, and network access.`);
         }
         throw err;
     }
@@ -151,92 +148,62 @@ async function sendQuery(question) {
 
 async function checkHealth() {
     try {
-        const res = await fetch(`${API_URL}/health`);
+        const res = await fetch(`${API_URL.replace(/\/+$/, '')}/health`);
+        if (!res.ok) throw new Error(`Health check HTTP ${res.status}`);
         const data = await res.json();
-
         console.log('🐝 ScriptBees RAG Server Health:', data);
 
-        if (!data.retriever_loaded || !data.generator_loaded) {
-            addMessage(
-                '⚠️ Server starting up. AI models are loading...\n' +
-                'This may take 1-2 minutes. Please wait.',
-                false
-            );
-            // Retry health check in 5 seconds
-            setTimeout(checkHealth, 5000);
+        // update status UI
+        if (data && data.status === 'healthy' && data.retriever_loaded && data.generator_loaded) {
+            setStatus(true);
         } else {
-            console.log(`✅ Server ready with ${data.num_documents} ScriptBees documents indexed`);
+            setStatus(false);
+        }
+
+        // if models still loading, show message and poll
+        if (data && (!data.retriever_loaded || !data.generator_loaded)) {
+            addMessage('⚠️ Server starting up. AI models are loading... This may take a minute or two.', false);
+            setTimeout(checkHealth, 5000);
         }
 
         return data;
     } catch (err) {
-        addMessage(
-            `❌ Cannot connect to backend at ${API_URL}\n\n` +
-            `Please ensure:\n` +
-            `1. Backend server is running\n` +
-            `2. Port 8000 is accessible\n` +
-            `3. CORS is configured correctly`,
-            false,
-            null,
-            true
-        );
+        console.warn('Health check failed', err);
+        setStatus(false);
+        // Only show the "cannot connect" message once to avoid spamming
+        // (If you want repeated messages, remove the guard)
+        addMessage(`❌ Cannot connect to backend at ${API_URL}\nPlease ensure backend is running and CORS allows this origin.`, false, null, true);
         return null;
     }
 }
 
-// ==========================================
-// FORM HANDLING
-// ==========================================
-
+// ========== SUBMIT HANDLING ==========
 async function handleSubmit(e) {
-    e.preventDefault();
-
+    if (e && typeof e.preventDefault === 'function') e.preventDefault();
     const question = userInput.value.trim();
     if (!question) return;
 
-    // Add user message
     addMessage(question, true);
-
-    // Reset input
     userInput.value = '';
     userInput.disabled = true;
     sendButton.disabled = true;
     sendButton.textContent = 'Thinking...';
-
     showTyping();
 
     try {
         const response = await sendQuery(question);
         removeTyping();
-        
-        // Add bot response with metadata
         addMessage(
-            response.answer,
+            response.answer || "No answer returned.",
             false,
-            response.sources,
+            response.sources || [],
             false,
-            {
-                response_time_seconds: response.response_time_seconds,
-                cached: response.cached
-            }
+            { response_time_seconds: response.response_time_seconds || 0, cached: !!response.cached }
         );
-
-        console.log('Response metadata:', {
-            cached: response.cached,
-            time: response.response_time_seconds,
-            sources: response.sources?.length || 0
-        });
-
     } catch (err) {
         removeTyping();
-        addMessage(
-            `⚠️ Error:\n${err.message}`,
-            false,
-            null,
-            true
-        );
+        addMessage(`⚠️ Error:\n${err.message}`, false, null, true);
         console.error('Query error:', err);
-
     } finally {
         userInput.disabled = false;
         sendButton.disabled = false;
@@ -245,81 +212,82 @@ async function handleSubmit(e) {
     }
 }
 
-// ==========================================
-// KEYBOARD SHORTCUTS
-// ==========================================
-
-userInput.addEventListener('keydown', e => {
+// ========== KEYBOARD SHORTCUTS ==========
+function handleKeydown(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
-        handleSubmit(e);
+        handleSubmit();
     }
-});
+}
 
-// ==========================================
-// INITIALIZATION
-// ==========================================
-
+// ========== INITIALIZATION ==========
 function init() {
+    // DOM refs - do them here so script works regardless of load order
+    chatMessages = document.getElementById('chat-messages');
+    chatForm = document.getElementById('chat-form');
+    userInput = document.getElementById('user-input');
+    sendButton = document.getElementById('send-button');
+    statusDot = document.getElementById('status-dot');
+    statusText = document.getElementById('status-text');
+
+    // Attach listeners
+    if (chatForm) {
+        // prevent default if user presses submit in a browser that still treats button as submit
+        chatForm.addEventListener('submit', handleSubmit);
+    }
+    if (sendButton) {
+        sendButton.addEventListener('click', handleSubmit);
+    }
+    if (userInput) {
+        userInput.addEventListener('keydown', handleKeydown);
+    }
+
+    // Console logs for debugging
     console.log('🐝 ScriptBees RAG Chatbot Initialized');
     console.log(`Backend: ${API_URL}`);
-    console.log(`API Key: ${API_KEY.substring(0, 8)}...`);
+    console.log(`API Key: ${API_KEY ? API_KEY.substring(0, 8) + '...' : '(empty)'}`);
 
-    // Check server health
+    // Health check + welcome message
     checkHealth();
 
-    // Show welcome message
     setTimeout(() => {
         addMessage(
             "👋 Welcome to ScriptBees RAG Chatbot!\n\n" +
-            "Ask me anything about ScriptBees' services, technologies, expertise, or projects.\n\n" +
-            "Example questions:\n" +
-            "• What services does ScriptBees offer?\n" +
-            "• Tell me about ScriptBees' expertise in cloud solutions\n" +
-            "• What industries does ScriptBees serve?\n" +
-            "• What is ScriptBees' approach to quality assurance?",
+            "Ask me anything about ScriptBees' services, technologies, or projects.\n\n" +
+            "Example:\n• What services does ScriptBees offer?\n• Tell me about ScriptBees' cloud expertise.",
             false
         );
     }, 200);
 }
 
-// ==========================================
-// EVENT LISTENERS
-// ==========================================
-
-chatForm.addEventListener('submit', handleSubmit);
-
-// Initialize when DOM is ready
+// ========== RUN ON LOAD ==========
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
 } else {
     init();
 }
 
-// ==========================================
-// UTILITY FUNCTIONS
-// ==========================================
-
-// Allow runtime API key updates (for testing)
+// ========== RUNTIME UTILITIES ==========
 window.updateApiKey = function(newKey) {
     API_KEY = String(newKey || '').trim();
     console.log('🔑 API key updated:', API_KEY ? API_KEY.substring(0, 10) + '...' : '(empty)');
 };
 
-// Allow runtime backend URL updates (for testing)
 window.updateBackendUrl = function(newUrl) {
     API_URL = String(newUrl || '').trim();
     console.log('🔗 Backend URL updated:', API_URL);
 };
 
-// Clear chat history
 window.clearChat = function() {
-    chatMessages.innerHTML = '';
+    if (chatMessages) chatMessages.innerHTML = '';
     console.log('🗑️ Chat cleared');
-    init(); // Show welcome message again
+    // re-show welcome message
+    setTimeout(() => {
+        addMessage("👋 Welcome back — ask another question!", false);
+    }, 150);
 };
 
-// Export for debugging
+// Export small api for debugging
 window.scriptbeesChat = {
     sendQuery,
     checkHealth,
